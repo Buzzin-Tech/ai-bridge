@@ -64,14 +64,16 @@ const TOOLS = [
   },
   {
     name: "ask_antigravity",
-    description: "Ask Antigravity (Gemini) a question from Claude Code. Automatically resumes the most recent Gemini session for the project so it has full context. Use this when you want a second opinion from Antigravity's AI without switching tabs.",
+    description: "Ask Antigravity (via the `agy` CLI) for a code review or second opinion from Claude Code. Runs headlessly in read-only `plan` mode by default so files are not modified, and returns a `conversation_id` you can pass back on follow-up turns.",
     inputSchema: {
       type: "object",
       required: ["question"],
       properties: {
-        question: { type: "string", description: "The question or task for Antigravity" },
-        project_path: { type: "string", description: "Project directory — Antigravity resumes its most recent session there" },
-        model: { type: "string", description: "Gemini model override (e.g. gemini-2.5-pro). Defaults to Antigravity's configured model." },
+        question: { type: "string", description: "The question, review request, or task for Antigravity" },
+        project_path: { type: "string", description: "Project directory — Antigravity inspects files in this directory" },
+        model: { type: "string", description: "Antigravity model override (refer to `agy models`). Defaults to your configured Antigravity CLI model." },
+        conversation_id: { type: "string", description: "Optional conversation ID from a previous `ask_antigravity` response to continue the same review thread" },
+        mode: { type: "string", description: "Antigravity execution mode (`plan` default for read-only reviews, or `default`)." },
       },
     },
   },
@@ -126,7 +128,13 @@ function makeServer() {
         case "ag_inject_message":
           return { content: [{ type: "text", text: injectMessage(args.content, args?.title ?? "Claude Code", args?.session_id) }] };
         case "ask_antigravity": {
-          const response = await askAntigravity(args.question, args?.project_path ?? null, args?.model ?? null);
+          const response = await askAntigravity(
+            args.question,
+            args?.project_path ?? null,
+            args?.model ?? null,
+            args?.conversation_id ?? null,
+            args?.mode ?? "plan"
+          );
           return { content: [{ type: "text", text: response }] };
         }
         case "get_bridge_activity": {

@@ -1,84 +1,142 @@
-import { readFileSync, existsSync, statSync } from "fs";
+import { execFileSync } from "child_process";
+import { existsSync } from "fs";
+import { homedir } from "os";
 import { join } from "path";
-import { injectMessage, getActiveSessionId, listSessions } from "./antigravity.js";
-import { config } from "./config.js";
 import { logActivity } from "./activity.js";
 
-function getTranscriptPath(sessionId) {
-  return join(config.antigravity.brainPath, sessionId, ".system_generated", "logs", "transcript.jsonl");
-}
-
-function getLastModelStep(sessionId) {
-  const path = getTranscriptPath(sessionId);
-  if (!existsSync(path)) return -1;
-  const lines = readFileSync(path, "utf8").trim().split("\n").filter(Boolean);
-  let last = -1;
-  for (const line of lines) {
-    try {
-      const e = JSON.parse(line);
-      if (e.source === "MODEL" && typeof e.step_index === "number") last = e.step_index;
-    } catch {}
+function resolveAgyBinary() {
+  if (process.env.AGY_BIN && existsSync(process.env.AGY_BIN)) {
+    return process.env.AGY_BIN;
   }
-  return last;
-}
 
-function readNewModelResponse(sessionId, afterStep, afterTime) {
-  const path = getTranscriptPath(sessionId);
-  if (!existsSync(path)) return null;
-  const lines = readFileSync(path, "utf8").trim().split("\n").filter(Boolean);
-  for (const line of lines) {
-    try {
-      const e = JSON.parse(line);
-      if (e.source !== "MODEL") continue;
-      if (typeof e.step_index === "number" && e.step_index <= afterStep) continue;
-      const created = new Date(e.created_at ?? 0).getTime();
-      if (created < afterTime) continue;
-      // Got a new model response — extract text
-      let content = e.content ?? "";
-      content = content.replace(/<USER_REQUEST>\n?/g, "").replace(/\n?<\/USER_REQUEST>/g, "");
-      content = content.replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, "").trim();
-      if (content.length > 0) return content;
-    } catch {}
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
+    const winBin = join(localAppData, "agy", "bin", "agy.exe");
+    if (existsSync(winBin)) return winBin;
+  } else {
+    const unixBin = join(homedir(), ".local", "bin", "agy");
+    if (existsSync(unixBin)) return unixBin;
   }
-  return null;
+
+  return "agy";
 }
 
-export async function askAntigravity(question, projectPath = null, model = null) {
+function parseAgyJson(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const lines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        return JSON.parse(lines[i]);
+      } catch {}
+    }
+    return null;
+  }
+}
+
+/**
+ * Invoke the Antigravity CLI (agy) headlessly to get a review or second opinion.
+ */
+export async function askAntigravity(
+  question,
+  projectPath = null,
+  model = null,
+  conversationId = null,
+  mode = "plan"
+) {
   if (Number(process.env.AI_BRIDGE_DEPTH ?? 0) >= 2) {
     throw new Error("Blocked recursive bridge call (depth limit reached).");
   }
 
-  // Find the right session — by project path or most recent
-  let sessionId;
-  if (projectPath) {
-    const sessions = listSessions(20);
-    const match = sessions.find(s => s.project && s.project.toLowerCase().includes(projectPath.toLowerCase().split(/[\\/]/).pop()));
-    sessionId = match?.id ?? getActiveSessionId();
-  } else {
-    sessionId = getActiveSessionId();
-  }
+  const agyBin = resolveAgyBinary();
+  const resolvedMode = mode || "plan";
+  const args = ["-p", question, "--output-format", "json", "--mode", resolvedMode];
+  if (resolvedMode !== "plan") args.push("--disable-slash-commands");
+  if (model) args.push("--model", model);
+  if (conversationId) args.push("--conversation", conversationId);
 
-  const beforeStep = getLastModelStep(sessionId);
-  const beforeTime = Date.now();
+  const cwd = projectPath && existsSync(projectPath) ? projectPath : process.cwd();
+  const env = {
+    ...process.env,
+    AI_BRIDGE_DEPTH: String(Number(process.env.AI_BRIDGE_DEPTH ?? 0) + 1),
+  };
 
-  // Inject the question into the live Antigravity session
-  injectMessage(question, "Claude Code (ask_antigravity)", sessionId);
+  try {
+    const raw = execFileSync(agyBin, args, {
+      cwd,
+      encoding: "utf8",
+      timeout: 180000,
+      maxBuffer: 1024 * 1024 * 10,
+      windowsHide: true,
+      env,
+    });
 
-  // Poll transcript for new MODEL response (up to 90 seconds)
-  const pollInterval = 2500;
-  const maxWait = 90000;
-  const start = Date.now();
-
-  while (Date.now() - start < maxWait) {
-    await new Promise(r => setTimeout(r, pollInterval));
-    const response = readNewModelResponse(sessionId, beforeStep, beforeTime);
-    if (response) {
-      const env = { ...process.env, AI_BRIDGE_DEPTH: String(Number(process.env.AI_BRIDGE_DEPTH ?? 0) + 1) };
-      logActivity({ from: "claude", to: "antigravity", question, projectPath, model: "antigravity-live", response });
-      return response;
+    const parsed = parseAgyJson(raw);
+    if (parsed?.status && parsed.status !== "SUCCESS") {
+      throw new Error(parsed.error || `Antigravity exited with status ${parsed.status}`);
     }
-  }
 
-  logActivity({ from: "claude", to: "antigravity", question, projectPath, error: "Timeout: no response from Antigravity within 90s" });
-  throw new Error("Timeout: Antigravity did not respond within 90 seconds. Make sure Antigravity is open and active.");
+    const responseText = (parsed?.response ?? raw).trim();
+    const returnedConversationId = parsed?.conversation_id ?? conversationId ?? null;
+    const output = returnedConversationId
+      ? `${responseText}\n\n[Antigravity conversation_id: ${returnedConversationId}]`
+      : responseText;
+
+    logActivity({
+      from: "claude",
+      to: "antigravity",
+      question,
+      projectPath,
+      model: model ?? "antigravity-default",
+      conversationId: returnedConversationId,
+      response: output,
+    });
+
+    return output;
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      const msg = "Antigravity CLI (agy) is not installed. Run in PowerShell: irm https://antigravity.google/cli/install.ps1 | iex";
+      logActivity({
+        from: "claude",
+        to: "antigravity",
+        question,
+        projectPath,
+        model: model ?? "antigravity-default",
+        error: msg,
+      });
+      throw new Error(msg);
+    }
+
+    const stdout = err.stdout?.toString().trim() ?? "";
+    const stderr = err.stderr?.toString().trim() ?? "";
+    const combined = [stdout, stderr, err.message].filter(Boolean).join("\n");
+
+    if (/authentication required|not authenticated|login/i.test(combined)) {
+      const msg = "Antigravity CLI is not authenticated. Run `agy` once in a terminal to complete interactive sign-in.";
+      logActivity({
+        from: "claude",
+        to: "antigravity",
+        question,
+        projectPath,
+        model: model ?? "antigravity-default",
+        error: msg,
+      });
+      throw new Error(msg);
+    }
+
+    const msg = stdout || stderr || err.message;
+    logActivity({
+      from: "claude",
+      to: "antigravity",
+      question,
+      projectPath,
+      model: model ?? "antigravity-default",
+      error: msg,
+    });
+    throw new Error(`Antigravity CLI error: ${msg}`);
+  }
 }

@@ -13,21 +13,20 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverPath = resolve(join(__dirname, "..", "src", "server.js"));
 
 // ── Claude Code ──────────────────────────────────────────────────────────────
-console.log("Registering with Claude Code...");
+console.log("Registering with Claude Code (global user scope)...");
 try {
   execSync(
-    `claude mcp add ai-bridge node "${serverPath}"`,
+    `claude mcp add -s user ai-bridge -- node "${serverPath}"`,
     { stdio: "inherit" }
   );
-  console.log("✓ Claude Code: ai-bridge MCP registered");
+  console.log("✓ Claude Code: ai-bridge MCP registered globally");
 } catch (e) {
   console.warn("⚠ Could not register with Claude Code automatically.");
-  console.warn(`  Run manually: claude mcp add ai-bridge node "${serverPath}"`);
+  console.warn(`  Run manually: claude mcp add -s user ai-bridge -- node "${serverPath}"`);
 }
 
 // ── Antigravity ──────────────────────────────────────────────────────────────
-// Antigravity requires HTTP-based MCP servers (serverUrl format, not stdio).
-// The bridge must be running as an HTTP server: node src/server.js http
+// Antigravity supports Streamable HTTP (url: .../mcp) or Stdio.
 const agMcpPath = join(homedir(), ".gemini", "antigravity", "mcp_config.json");
 const PORT = process.env.AI_BRIDGE_PORT ?? "3099";
 
@@ -37,10 +36,10 @@ if (existsSync(agMcpPath)) {
   try { cfg = JSON.parse(readFileSync(agMcpPath, "utf8")); } catch {}
   cfg.mcpServers = cfg.mcpServers ?? {};
   cfg.mcpServers["ai-bridge"] = {
-    serverUrl: `http://localhost:${PORT}/sse`,
+    url: `http://localhost:${PORT}/mcp`,
   };
   writeFileSync(agMcpPath, JSON.stringify(cfg, null, 2), "utf8");
-  console.log("✓ Antigravity: ai-bridge registered at http://localhost:" + PORT + "/sse");
+  console.log("✓ Antigravity: ai-bridge registered at http://localhost:" + PORT + "/mcp");
   console.log("  IMPORTANT: Start the HTTP server before using Antigravity tools:");
   console.log(`  node "${serverPath}" http`);
 } else {

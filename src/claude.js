@@ -28,11 +28,17 @@ export async function askClaude(question, sessionContext = null, projectPath = n
     cmd = `claude ${modelFlag} -p "${escaped}" --output-format text`;
   }
 
+  const env = {
+    ...process.env,
+    AI_BRIDGE_DEPTH: String(Number(process.env.AI_BRIDGE_DEPTH ?? 0) + 1),
+  };
+
   try {
     const result = execSync(cmd, {
       encoding: "utf8",
       timeout: 120000,
       maxBuffer: 1024 * 1024 * 10,
+      env,
     });
     const response = result.trim();
     logActivity({ from: "antigravity", to: "claude", question, projectPath, model: model ?? "claude-sonnet-4-6", response });
@@ -42,7 +48,7 @@ export async function askClaude(question, sessionContext = null, projectPath = n
     if (projectPath && (err.stderr?.includes("No session") || err.stderr?.includes("not found"))) {
       const fallback = execSync(
         `claude --cwd "${projectPath}" -p "${escaped}" --output-format text`,
-        { encoding: "utf8", timeout: 120000, maxBuffer: 1024 * 1024 * 10 }
+        { encoding: "utf8", timeout: 120000, maxBuffer: 1024 * 1024 * 10, env }
       );
       const response = fallback.trim();
       logActivity({ from: "antigravity", to: "claude", question, projectPath, model: model ?? "claude-sonnet-4-6", response });
