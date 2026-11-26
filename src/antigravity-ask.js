@@ -12,8 +12,8 @@ export async function askAntigravity(question, projectPath = null, model = null)
     throw new Error("Blocked recursive bridge call (depth limit reached).");
   }
 
-  const baseArgs = ["-p", question, "--output-format", "text", "--skip-trust"];
-  if (model) baseArgs.push("--model", model);
+  const resolvedModel = model ?? "gemini-3.8-flash";
+  const baseArgs = ["-p", question, "--output-format", "text", "--skip-trust", "--model", resolvedModel];
 
   const env = {
     ...process.env,
@@ -33,7 +33,7 @@ export async function askAntigravity(question, projectPath = null, model = null)
     try {
       const result = runGemini(args, execOpts);
       const response = result.trim();
-      logActivity({ from: "claude", to: "antigravity", question, projectPath, model: model ?? "gemini-default", response });
+      logActivity({ from: "claude", to: "antigravity", question, projectPath, model: resolvedModel, response });
       return response;
     } catch (err) {
       const stderr = err.stderr?.toString() ?? "";
@@ -41,7 +41,7 @@ export async function askAntigravity(question, projectPath = null, model = null)
       // If this was the --resume attempt and it failed for session reasons, retry without it
       if (args.includes("--resume") && isResumeError) continue;
       const msg = err.stdout?.toString().trim() || stderr.trim() || err.message;
-      logActivity({ from: "claude", to: "antigravity", question, projectPath, error: msg });
+      logActivity({ from: "claude", to: "antigravity", question, projectPath, model: resolvedModel, error: msg });
       throw new Error(`Gemini CLI error: ${msg}`);
     }
   }
