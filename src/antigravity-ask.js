@@ -1,10 +1,46 @@
-import { execSync } from "child_process";
+import { readFileSync, existsSync, statSync } from "fs";
+import { join } from "path";
+import { injectMessage, getActiveSessionId, listSessions } from "./antigravity.js";
+import { config } from "./config.js";
 import { logActivity } from "./activity.js";
 
-// On Windows, gemini is a .cmd file — use shell:true via execSync so it resolves correctly
-function runGemini(args, opts) {
-  const cmd = `gemini ${args.map(a => `"${a.replace(/"/g, '\\"')}"`).join(" ")}`;
-  return execSync(cmd, { shell: true, ...opts });
+function getTranscriptPath(sessionId) {
+  return join(config.antigravity.brainPath, sessionId, ".system_generated", "logs", "transcript.jsonl");
+}
+
+function getLastModelStep(sessionId) {
+  const path = getTranscriptPath(sessionId);
+  if (!existsSync(path)) return -1;
+  const lines = readFileSync(path, "utf8").trim().split("\n").filter(Boolean);
+  let last = -1;
+  for (const line of lines) {
+    try {
+      const e = JSON.parse(line);
+      if (e.source === "MODEL" && typeof e.step_index === "number") last = e.step_index;
+    } catch {}
+  }
+  return last;
+}
+
+function readNewModelResponse(sessionId, afterStep, afterTime) {
+  const path = getTranscriptPath(sessionId);
+  if (!existsSync(path)) return null;
+  const lines = readFileSync(path, "utf8").trim().split("\n").filter(Boolean);
+  for (const line of lines) {
+    try {
+      const e = JSON.parse(line);
+      if (e.source !== "MODEL") continue;
+      if (typeof e.step_index === "number" && e.step_index <= afterStep) continue;
+      const created = new Date(e.created_at ?? 0).getTime();
+      if (created < afterTime) continue;
+      // Got a new model response — extract text
+      let content = e.content ?? "";
+      content = content.replace(/<USER_REQUEST>\n?/g, "").replace(/\n?<\/USER_REQUEST>/g, "");
+      content = content.replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, "").trim();
+      if (content.length > 0) return content;
+    } catch {}
+  }
+  return null;
 }
 
 export async function askAntigravity(question, projectPath = null, model = null) {
@@ -12,37 +48,37 @@ export async function askAntigravity(question, projectPath = null, model = null)
     throw new Error("Blocked recursive bridge call (depth limit reached).");
   }
 
-  const resolvedModel = model ?? "gemini-3.8-flash";
-  const baseArgs = ["-p", question, "--output-format", "text", "--skip-trust", "--model", resolvedModel];
+  // Find the right session — by project path or most recent
+  let sessionId;
+  if (projectPath) {
+    const sessions = listSessions(20);
+    const match = sessions.find(s => s.project && s.project.toLowerCase().includes(projectPath.toLowerCase().split(/[\\/]/).pop()));
+    sessionId = match?.id ?? getActiveSessionId();
+  } else {
+    sessionId = getActiveSessionId();
+  }
 
-  const env = {
-    ...process.env,
-    AI_BRIDGE_DEPTH: String(Number(process.env.AI_BRIDGE_DEPTH ?? 0) + 1),
-  };
+  const beforeStep = getLastModelStep(sessionId);
+  const beforeTime = Date.now();
 
-  const execOpts = {
-    cwd: projectPath ?? process.cwd(),
-    encoding: "utf8",
-    timeout: 180000,
-    maxBuffer: 1024 * 1024 * 10,
-    env,
-  };
+  // Inject the question into the live Antigravity session
+  injectMessage(question, "Claude Code (ask_antigravity)", sessionId);
 
-  // Try with --resume latest first; fall back without it if no prior session exists
-  for (const args of [[...baseArgs, "--resume", "latest"], baseArgs]) {
-    try {
-      const result = runGemini(args, execOpts);
-      const response = result.trim();
-      logActivity({ from: "claude", to: "antigravity", question, projectPath, model: resolvedModel, response });
+  // Poll transcript for new MODEL response (up to 90 seconds)
+  const pollInterval = 2500;
+  const maxWait = 90000;
+  const start = Date.now();
+
+  while (Date.now() - start < maxWait) {
+    await new Promise(r => setTimeout(r, pollInterval));
+    const response = readNewModelResponse(sessionId, beforeStep, beforeTime);
+    if (response) {
+      const env = { ...process.env, AI_BRIDGE_DEPTH: String(Number(process.env.AI_BRIDGE_DEPTH ?? 0) + 1) };
+      logActivity({ from: "claude", to: "antigravity", question, projectPath, model: "antigravity-live", response });
       return response;
-    } catch (err) {
-      const stderr = err.stderr?.toString() ?? "";
-      const isResumeError = stderr.includes("No session") || stderr.includes("not found") || stderr.includes("resume");
-      // If this was the --resume attempt and it failed for session reasons, retry without it
-      if (args.includes("--resume") && isResumeError) continue;
-      const msg = err.stdout?.toString().trim() || stderr.trim() || err.message;
-      logActivity({ from: "claude", to: "antigravity", question, projectPath, model: resolvedModel, error: msg });
-      throw new Error(`Gemini CLI error: ${msg}`);
     }
   }
+
+  logActivity({ from: "claude", to: "antigravity", question, projectPath, error: "Timeout: no response from Antigravity within 90s" });
+  throw new Error("Timeout: Antigravity did not respond within 90 seconds. Make sure Antigravity is open and active.");
 }
