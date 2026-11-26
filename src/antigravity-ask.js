@@ -1,51 +1,48 @@
-import { execFileSync } from "child_process";
+import { execSync } from "child_process";
 import { logActivity } from "./activity.js";
 
+// On Windows, gemini is a .cmd file — use shell:true via execSync so it resolves correctly
+function runGemini(args, opts) {
+  const cmd = `gemini ${args.map(a => `"${a.replace(/"/g, '\\"')}"`).join(" ")}`;
+  return execSync(cmd, { shell: true, ...opts });
+}
+
 export async function askAntigravity(question, projectPath = null, model = null) {
-  // Guard against infinite loops (Antigravity → Claude → Antigravity → ...)
   if (Number(process.env.AI_BRIDGE_DEPTH ?? 0) >= 2) {
     throw new Error("Blocked recursive bridge call (depth limit reached).");
   }
 
-  const args = ["-p", question, "--output-format", "text", "--skip-trust"];
-  if (model) args.push("--model", model);
-  // Resume the most recent Gemini session for this project if one exists
-  args.push("--resume", "latest");
+  const baseArgs = ["-p", question, "--output-format", "text"];
+  if (model) baseArgs.push("--model", model);
 
   const env = {
     ...process.env,
     AI_BRIDGE_DEPTH: String(Number(process.env.AI_BRIDGE_DEPTH ?? 0) + 1),
   };
 
-  try {
-    const result = execFileSync("gemini", args, {
-      cwd: projectPath ?? process.cwd(),
-      encoding: "utf8",
-      timeout: 180000,
-      maxBuffer: 1024 * 1024 * 10,
-      env,
-    });
-    const response = result.trim();
-    logActivity({ from: "claude", to: "antigravity", question, projectPath, model: model ?? "gemini-default", response });
-    return response;
-  } catch (err) {
-    // If --resume latest fails (no prior session), retry without it
-    const stderr = err.stderr?.toString() ?? "";
-    if (stderr.includes("No session") || stderr.includes("not found") || stderr.includes("resume")) {
-      const argsNoResume = args.filter(a => a !== "--resume" && a !== "latest");
-      const fallback = execFileSync("gemini", argsNoResume, {
-        cwd: projectPath ?? process.cwd(),
-        encoding: "utf8",
-        timeout: 180000,
-        maxBuffer: 1024 * 1024 * 10,
-        env,
-      });
-      const response = fallback.trim();
+  const execOpts = {
+    cwd: projectPath ?? process.cwd(),
+    encoding: "utf8",
+    timeout: 180000,
+    maxBuffer: 1024 * 1024 * 10,
+    env,
+  };
+
+  // Try with --resume latest first; fall back without it if no prior session exists
+  for (const args of [[...baseArgs, "--resume", "latest"], baseArgs]) {
+    try {
+      const result = runGemini(args, execOpts);
+      const response = result.trim();
       logActivity({ from: "claude", to: "antigravity", question, projectPath, model: model ?? "gemini-default", response });
       return response;
+    } catch (err) {
+      const stderr = err.stderr?.toString() ?? "";
+      const isResumeError = stderr.includes("No session") || stderr.includes("not found") || stderr.includes("resume");
+      // If this was the --resume attempt and it failed for session reasons, retry without it
+      if (args.includes("--resume") && isResumeError) continue;
+      const msg = err.stdout?.toString().trim() || stderr.trim() || err.message;
+      logActivity({ from: "claude", to: "antigravity", question, projectPath, error: msg });
+      throw new Error(`Gemini CLI error: ${msg}`);
     }
-    const msg = err.stdout?.toString().trim() || stderr.trim() || err.message;
-    logActivity({ from: "claude", to: "antigravity", question, projectPath, error: msg });
-    throw new Error(`Gemini CLI error: ${msg}`);
   }
 }
