@@ -26,9 +26,8 @@ try {
 }
 
 // ── Antigravity ──────────────────────────────────────────────────────────────
-// Antigravity supports Streamable HTTP (url: .../mcp) or Stdio.
+// Antigravity supports Stdio (recommended) and Streamable HTTP.
 const agMcpPath = join(homedir(), ".gemini", "antigravity", "mcp_config.json");
-const PORT = process.env.AI_BRIDGE_PORT ?? "3099";
 
 if (existsSync(agMcpPath)) {
   console.log("\nRegistering with Antigravity...");
@@ -36,12 +35,11 @@ if (existsSync(agMcpPath)) {
   try { cfg = JSON.parse(readFileSync(agMcpPath, "utf8")); } catch {}
   cfg.mcpServers = cfg.mcpServers ?? {};
   cfg.mcpServers["ai-bridge"] = {
-    url: `http://localhost:${PORT}/mcp`,
+    command: "node",
+    args: [serverPath],
   };
   writeFileSync(agMcpPath, JSON.stringify(cfg, null, 2), "utf8");
-  console.log("✓ Antigravity: ai-bridge registered at http://localhost:" + PORT + "/mcp");
-  console.log("  IMPORTANT: Start the HTTP server before using Antigravity tools:");
-  console.log(`  node "${serverPath}" http`);
+  console.log("✓ Antigravity: ai-bridge registered (Stdio)");
 } else {
   console.warn("⚠ Antigravity mcp_config.json not found — skipping Antigravity registration.");
 }
