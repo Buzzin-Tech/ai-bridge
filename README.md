@@ -132,17 +132,17 @@ Or from Claude Code:
 
 ## Cross-project bridging
 
-If both AIs have context on the same project (e.g. you have a `MEXC` project in Claude Code and a `mexc_liquidity_signals` session in Antigravity), you can connect them:
+If both AIs have context on the same project, you can connect them:
 
 1. From Claude Code: use `ag_read_session` to pull Antigravity's view of the project
-2. From Antigravity: use `ask_claude` to ask Claude Code about the project, the bridge automatically includes your Antigravity session context in Claude's prompt
+2. From Antigravity: use `ask_claude` to ask Claude Code about the project — the bridge automatically includes your Antigravity session context in Claude's prompt
 3. Claude Code can inject findings back via `ag_inject_message`
 
 Both AIs see each other's work. No manual copy-pasting.
 
 ## Works with Omni
 
-If you use the [Omni Context MCP](https://github.com/omni-context), the bridge complements it: Omni tracks *what files* both AIs touched; this bridge exposes the *full conversation* of each session.
+If you use [OmniContext](https://github.com/SheikhMustehsan/omni-context), the bridge complements it: Omni tracks *what files* both AIs touched and indexes tool calls, errors and solutions into a searchable local database; this bridge exposes the *full conversation* of each session and lets both AIs talk to each other directly.
 
 ## Requirements
 
