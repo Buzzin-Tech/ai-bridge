@@ -1,0 +1,4 @@
+node_modules/
+ai-bridge.config.json
+*.log
+.env
