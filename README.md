@@ -1,155 +1,201 @@
 # AI Bridge
 
-A local MCP server that bridges **Claude Code** and **Antigravity** — letting both AIs share context and communicate without you switching tabs or copy-pasting.
+A local MCP server that connects Claude Code and Antigravity — both AIs can ask each other questions, share session context, and exchange findings without you switching tabs or copy-pasting anything.
 
-## What it does
+## Why use it
 
-| From | To | How |
-|------|-----|-----|
-| Claude Code | Antigravity | Inject a message directly into the active Antigravity session (shows as a SYSTEM message) |
-| Claude Code | Antigravity | Read the full conversation transcript of any session |
-| Antigravity | Claude Code | Call Claude tools from within Antigravity via MCP |
-| Either | Either | Search across all sessions for past discussions |
+Working across Claude Code and Antigravity means each AI only knows what happened in its own sessions. If Antigravity is debugging something and you want Claude's take, you copy the context, switch tools, explain everything again, bring the answer back. AI Bridge cuts that loop out.
+
+From Antigravity you can call `ask_claude` and get a real Claude response — not a fresh blank instance, but the most recent Claude session for that project, with all its context already loaded. The answer comes back in your Antigravity conversation. From Claude Code you can call `ask_antigravity` and get Gemini's read on the same codebase. A shared activity log lets either AI see what the other has been asked.
 
 ## How it works
 
-Antigravity stores full conversation transcripts on disk at:
+### Antigravity message bus
+
+Antigravity stores transcripts and a live message bus on disk:
+
 ```
 ~/.gemini/antigravity/brain/{session-id}/.system_generated/logs/transcript.jsonl
-```
-
-It also has a message bus at:
-```
 ~/.gemini/antigravity/brain/{session-id}/.system_generated/messages/
 ```
 
-Writing a JSON file there injects a `MESSAGE_PRIORITY_HIGH` SYSTEM message directly into the live session — Antigravity's AI sees it mid-conversation.
+Writing a JSON file to the messages folder injects a `MESSAGE_PRIORITY_HIGH` SYSTEM message into the live Antigravity session — the AI sees it mid-conversation. AI Bridge wraps this as an MCP tool so Claude Code can push messages directly.
 
-This bridge exposes that mechanism as standard MCP tools, so Claude Code (or any MCP client) can read and write to Antigravity sessions seamlessly.
+### Session routing
 
-## Setup
+When Antigravity calls `ask_claude`, the bridge runs:
 
-### 1. Install dependencies
+```
+claude --continue --fork-session --cwd <project_path>
+```
+
+This forks the most recent Claude session for that project — Claude already knows the codebase and conversation history. The live session is untouched. Same in reverse: `ask_antigravity` runs `gemini --resume latest` to pick up Antigravity's most recent session.
+
+If neither AI has worked in that project before, both fall back to a fresh instance in the right directory.
+
+### Two transports, one server
+
+```
+node src/server.js        → stdio (Claude Code)
+node src/server.js http   → Streamable HTTP on :3099 (Antigravity)
+```
+
+Claude Code connects via stdio as usual. Antigravity, which requires HTTP-based MCP servers, connects to `http://localhost:3099/mcp`.
+
+## MCP tools
+
+### `ask_claude`
+Ask Claude from Antigravity. Passes your current Antigravity session as context and routes to the most recent Claude session for the project.
+```json
+{
+  "question": "Is this error handling correct?",
+  "project_path": "C:/dev/my-project",
+  "inject_response": true,
+  "model": "claude-sonnet-4-6"
+}
+```
+- `project_path` — picks up the most recent Claude session for that path instead of starting fresh
+- `inject_response` — also pushes the reply as a SYSTEM message into your Antigravity session
+- `model` — defaults to `claude-sonnet-4-6`; use `claude-opus-4-5` for deeper work
+
+### `ask_antigravity`
+Ask Antigravity from Claude Code. Resumes the most recent Gemini session for the project.
+```json
+{
+  "question": "Review this approach and flag any risks",
+  "project_path": "C:/dev/my-project",
+  "model": "gemini-2.5-pro"
+}
+```
+
+### `ag_inject_message`
+Push a message directly into a live Antigravity session. The AI sees it immediately as a SYSTEM message.
+```json
+{ "content": "Claude says: the race condition is on line 42", "title": "Claude Code" }
+```
+
+### `ag_read_session`
+Read the transcript of the active (or any) Antigravity session.
+```json
+{ "session_id": "optional-uuid", "limit": 30 }
+```
+
+### `ag_list_sessions`
+List all Antigravity sessions sorted by most recent activity.
+
+### `ag_search`
+Full-text search across all Antigravity session transcripts.
+```json
+{ "query": "auth bug", "limit": 10 }
+```
+
+### `get_bridge_activity`
+See all recent cross-AI conversations — questions, answers, errors — from either side.
+```json
+{ "limit": 20 }
+```
+Useful when you want to catch up on what Antigravity asked while you were working in Claude Code, or vice versa.
+
+## Installation
+
+**Requirements:** Node.js 18+, Claude Code CLI, Antigravity, Gemini CLI (bundled with Antigravity)
+
+### 1. Clone and install
 
 ```bash
-cd "Ai Bridge"
+git clone https://github.com/SheikhMustehsan/ai-bridge
+cd ai-bridge
 npm install
 ```
 
-### 2. Auto-install (registers with both Claude Code and Antigravity)
+### 2. Register with both tools
 
 ```bash
 npm run install-mcp
 ```
 
-Or manually:
+This registers the bridge with Claude Code (stdio) and writes the HTTP server URL to Antigravity's MCP config.
+
+Manual setup if you prefer:
 
 **Claude Code:**
 ```bash
-claude mcp add ai-bridge node "/path/to/Ai Bridge/src/server.js"
+claude mcp add ai-bridge node "/path/to/ai-bridge/src/server.js"
 ```
 
-**Antigravity** — add to `~/.gemini/antigravity/mcp_config.json`:
+**Antigravity** (`~/.gemini/antigravity/mcp_config.json`):
 ```json
 {
   "mcpServers": {
     "ai-bridge": {
-      "serverUrl": "http://localhost:3099/sse"
+      "url": "http://localhost:3099/mcp"
     }
   }
 }
 ```
 
-> **Note:** Antigravity requires HTTP-based MCP servers. The bridge must be running before you open Antigravity.
-
 ### 3. Start the HTTP server
 
-The bridge runs as an HTTP server on port 3099 for Antigravity to connect to:
+Antigravity needs the bridge running before it connects:
 
 ```bash
 node src/server.js http
 ```
 
-To start it automatically with Windows, create a startup shortcut to `start-server.vbs`:
+**Auto-start on Windows (no terminal window):** run this once in PowerShell to create a startup shortcut that launches the included `start-server.vbs` silently:
 
-**PowerShell (run once):**
 ```powershell
 $WshShell = New-Object -ComObject WScript.Shell
 $shortcut = $WshShell.CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\AI Bridge.lnk")
 $shortcut.TargetPath = "wscript.exe"
-$shortcut.Arguments = '"C:\Mustehsan\buzzintech\My Projects\Ai Bridge\start-server.vbs"'
+$shortcut.Arguments = '"C:\path\to\ai-bridge\start-server.vbs"'
 $shortcut.Save()
 ```
 
-### 4. Optional config
+### 4. Config (optional)
 
-Copy `ai-bridge.config.example.json` to `ai-bridge.config.json` in the project root (or `~/.config/ai-bridge/config.json`) and fill in your paths. The bridge auto-detects `~/.gemini/antigravity/brain` on most systems.
+Copy `ai-bridge.config.example.json` to `ai-bridge.config.json` and set your Antigravity brain path if it differs from the default (`~/.gemini/antigravity/brain`).
 
-## MCP Tools
+## Usage
 
-### `ask_claude`
-Ask Claude Code a question from within Antigravity. Automatically includes your current session as context.
+### Ask Claude for a code review from inside Antigravity
+
+Call `ask_claude` from your Antigravity session:
 ```json
-{ "question": "Review this logic", "inject_response": true }
+{
+  "question": "Review the error handling in the payment flow",
+  "project_path": "C:/dev/my-app",
+  "inject_response": true
+}
 ```
+The bridge forks Claude's most recent session for `my-app`. Claude has the codebase context. The response comes back as text and, with `inject_response: true`, appears as a SYSTEM message in your current Antigravity conversation.
 
-### `ag_read_session`
-Read the active Antigravity session transcript.
-```json
-{ "session_id": "optional", "limit": 30 }
+### Get a second opinion from Antigravity while in Claude Code
+
 ```
-
-### `ag_list_sessions`
-List all sessions with timestamps and working directories.
-
-### `ag_inject_message`
-Inject a message into the active Antigravity session.
-```json
-{ "content": "Here is what I think...", "title": "Claude Code" }
+"Ask Antigravity to review the cache layer approach"
 ```
+Claude calls `ask_antigravity`, Gemini resumes its most recent session for the project, and the response comes back for Claude to compare against its own analysis.
 
-### `ag_search`
-Search across all session transcripts.
-```json
-{ "query": "ledger fix", "limit": 10 }
+### Catch up on cross-AI activity
+
 ```
+"Show me the bridge activity"
+```
+Returns a timestamped log of every question either AI asked the other and every answer returned.
 
-## Usage example
+## Recursion guard
 
-You are in Antigravity working on a bug. You want Claude Code's input:
+If Antigravity calls `ask_claude` and Claude then calls `ask_antigravity`, the bridge tracks depth via `AI_BRIDGE_DEPTH` and blocks a third hop. Neither AI can create an infinite loop regardless of what it decides to do.
 
-> **In Antigravity:** Use the `ask_claude` tool with `"Review this logic and suggest improvements"`
->
-> The bridge calls Claude Code, passes your session context automatically, and returns Claude's response.
->
-> With `inject_response: true`, Claude's answer also appears as a SYSTEM message in your Antigravity conversation.
+## Works with OmniContext
 
-Or from Claude Code:
+AI Bridge pairs with [OmniContext](https://github.com/SheikhMustehsan/omni-context):
 
-> **You:** "What is Antigravity working on right now?"
->
-> Claude calls `ag_read_session` → reads your active Antigravity transcript → answers in full context.
+- **OmniContext** runs in the background and indexes file edits, tool calls, errors, and solutions from both AIs into a shared searchable database — passive memory that neither AI needs to manage
+- **AI Bridge** is the active layer — both AIs can ask each other questions and get answers in real time
 
-## Cross-project bridging
-
-If both AIs have context on the same project, you can connect them:
-
-1. From Claude Code: use `ag_read_session` to pull Antigravity's view of the project
-2. From Antigravity: use `ask_claude` to ask Claude Code about the project — the bridge automatically includes your Antigravity session context in Claude's prompt
-3. Claude Code can inject findings back via `ag_inject_message`
-
-Both AIs see each other's work. No manual copy-pasting.
-
-## Works with Omni
-
-If you use [OmniContext](https://github.com/SheikhMustehsan/omni-context), the bridge complements it: Omni tracks *what files* both AIs touched and indexes tool calls, errors and solutions into a searchable local database; this bridge exposes the *full conversation* of each session and lets both AIs talk to each other directly.
-
-## Requirements
-
-- Node.js 18+
-- Claude Code CLI
-- Antigravity editor
-- Windows / macOS / Linux
+OmniContext gives both AIs shared history. AI Bridge gives them a way to talk.
 
 ## License
 
