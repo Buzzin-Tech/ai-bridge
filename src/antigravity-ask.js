@@ -12,7 +12,7 @@ export async function askAntigravity(question, projectPath = null, model = null)
     throw new Error("Blocked recursive bridge call (depth limit reached).");
   }
 
-  const baseArgs = ["-p", question, "--output-format", "text"];
+  const baseArgs = ["-p", question, "--output-format", "text", "--skip-trust"];
   if (model) baseArgs.push("--model", model);
 
   const env = {
